@@ -4,3 +4,5 @@ Cargo.lock
 .vscode
 CBChannel.rs
 CBChannelRC.rs
+MiscBuildArtifacts/*
+.gitignore
