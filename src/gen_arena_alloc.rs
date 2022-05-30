@@ -5,54 +5,69 @@
 /// Mostly to prove I can, also incase I need to manipulate memory structures, double indirect or make custom fn's
 
 
-use std::iter::{self, Extend, FromIterator, FusedIterator};
-use std::sync::atomic::{AtomicU64};
+use std::iter::{self, Extend, FromIterator, FusedIterator}; // Reminder to make this iter friendly
+use std::ops::{Index, IndexMut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::ptr::NonNull;
 use std::marker::PhantomData;
-use std::cell::UnsafeCell;
 
 
 #[derive(Debug)]
 struct Arena<T> {
-    sections: Vec<Section<T>>,   // Sections inside the arena that it manages.
+    _sections: NonNull<Section<T>>,   // Pointer to the allocated memory. Only valid when used with the safe impl
+    size: usize, // Size of the allocated memory.
+    capacity: usize, // Memory left to allocate.
 }
 
 #[derive(Debug)]
 struct Section<T> {
-    inner: SectionInner<T>,
-    _marker: PhantomData<T>,
+    inner: *const SectionInner<T>,
+    _marker: PhantomData<T>, // Does this mean that the clones of this think they own the Data?
 }
 
 #[derive(Debug)]
 struct SectionInner<T> {
-    rc: AtomicU64, // The generation number.
-    rows: Vec<Chair<T>>, // Holds "Rows" of "Chairs" inside the "Section", get it? "Arena" Allocator, ok.
+    ptr: NonNull<Chair<T>>, // The pointer to the start of the section.
+    arc: AtomicU64, // The counter for how many referencers are alive.
+    size: usize, // Count of how many 'T' are owned by this section
 }
 
 #[derive(Debug)]
-// Due to it implementing `!Sync` UnsafeCell may cause problems here, If it does, `impl Chair` needs to emulate the `get , get_mut , and into_inner` functions from UnsafeCell
-struct Chair<T> (UnsafeCell<T>, AtomicU64); // Gives the interior mutability required for data to be modified after allocation, also give the generation number.
+struct Chair<T: Sized> {
+    data: T,
+    gen: AtomicU64,
+}
 
-impl<T> SectionInner<T> {
-    fn new() -> Self { 
-        Self {
-            rc:  AtomicU64::new(0), // The number of threads attached to the arena.
-            rows: Vec::new(), // Can't use an Arc due to its shared access constraints.
-        }
+impl<T> Index<usize> for Arena<T> {
+    type Output = Section<T>;
+
+    fn index(&self, idx: usize) -> &Section<T> {
+        Index::index(self, idx)
     }
 }
 
-impl<T> Chair<T> {
-    /// Creates a new Chair so data can be modified after allocation using interior mutability.
-    pub(crate) fn new(this: T) -> Self { Chair(UnsafeCell::new(this), AtomicU64::new(0)) }
+impl<T> Index<usize> for SectionInner<T> {
+    type Output = Chair<T>;
 
-    /// Unwraps the cell and returns the owned value
-    pub(crate) fn get(self) -> T { self.0.into_inner() }
+    fn index(&self, idx: usize) -> &Self::Output {
+        Index::index(self, idx)
+    }
+}
 
-    /// Returns a mutable pointer to the value behind the UnsafeCell
-    pub(crate) fn get_mut_unsafe(&self) -> *mut T { self.0.get() }
+impl<T> IndexMut<usize> for SectionInner<T> {
+    fn index_mut(&mut self, idx:usize) -> &mut Self::Output {
+        IndexMut::index_mut(self, idx)
+    }
+}
 
-    /// Returns an exclusive mutable reference to the value behind the UnsafeCell
-    /// Uses a mutable reference to help ensure exclusivity
-    pub(crate) fn get_mut(&mut self) -> &mut T { self.0.get_mut() }
+impl<T> Clone for Section<T> {
+    fn clone(&self) -> Section<T> {
+        let atomic = unsafe{ &(*self.inner).arc }; // Deref the pointer, get the inner atomic, and reference it.
+        atomic.fetch_add(1, Ordering::AcqRel);
+        Section {
+            inner: self.inner,
+            _marker: PhantomData,
+        }
+    }
 }
 
