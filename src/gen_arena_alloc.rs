@@ -1,4 +1,3 @@
-#[feature(allocator_api)]
 #[allow(dead_code)]
 
 /// A generational allocation manager based off of Catherine West's keynote @ RustConf 2018 and the generational-arena crate
@@ -6,68 +5,72 @@
 
 
 use std::iter::{self, Extend, FromIterator, FusedIterator}; // Reminder to make this iter friendly
-use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::ptr::NonNull;
-use std::marker::PhantomData;
-
+use std::sync::Arc;
 
 #[derive(Debug)]
 struct Arena<T> {
-    _sections: NonNull<Section<T>>,   // Pointer to the allocated memory. Only valid when used with the safe impl
-    size: usize, // Size of the allocated memory.
-    capacity: usize, // Memory left to allocate.
+    sections: Vec<Section<T>>,
 }
 
 #[derive(Debug)]
 struct Section<T> {
-    inner: *const SectionInner<T>,
-    _marker: PhantomData<T>, // Does this mean that the clones of this think they own the Data?
+    row: Arc<Vec<Chair<T>>>,
 }
 
 #[derive(Debug)]
-struct SectionInner<T> {
-    ptr: NonNull<Chair<T>>, // The pointer to the start of the section.
-    arc: AtomicU64, // The counter for how many referencers are alive.
-    size: usize, // Count of how many 'T' are owned by this section
-}
-
-#[derive(Debug)]
-struct Chair<T: Sized> {
+struct Chair<T> {
     data: T,
-    gen: AtomicU64,
+    gen: AtomicU64, // The data's current generation.
 }
 
-impl<T> Index<usize> for Arena<T> {
-    type Output = Section<T>;
+impl<T> Arena<T> {
+    fn new(data: T) -> Self {
+        Self { sections: vec!(Section::new(data)) }
+    }
 
-    fn index(&self, idx: usize) -> &Section<T> {
-        Index::index(self, idx)
+    fn new_uninit() -> Self {
+        Self { sections: Vec::new() }
     }
 }
 
-impl<T> Index<usize> for SectionInner<T> {
-    type Output = Chair<T>;
+impl<T> Section<T> {
+    fn new(data: T) -> Self {
+        Self { row: Arc::new(vec!(Chair::new(data))), }
+    }
 
-    fn index(&self, idx: usize) -> &Self::Output {
-        Index::index(self, idx)
+    fn new_uninit() -> Self {
+        Self { row: Arc::new(Vec::new()), }
+    }
+
+    fn generation(&self) -> (usize, usize) {
+        let mut gensplit = (0usize, 0usize);
+        for chair in self.row.iter() {
+            let cmpr = chair.gen.load(Ordering::Relaxed) as usize;
+            if cmpr != gensplit.0 && cmpr != gensplit.1 {
+                if gensplit.0 == 0 { gensplit.0 = cmpr; }
+                else if gensplit.1 == 0 { gensplit.1 = cmpr; }
+                else {unreachable!();} // Really hope this is actually unreachable...
+            };
+        }
+        gensplit
+    }
+
+    fn index_generation(&self, idx: usize) -> usize {
+        (*self.row)[idx].gen.load(Ordering::Relaxed) as usize
     }
 }
 
-impl<T> IndexMut<usize> for SectionInner<T> {
-    fn index_mut(&mut self, idx:usize) -> &mut Self::Output {
-        IndexMut::index_mut(self, idx)
-    }
-}
-
-impl<T> Clone for Section<T> {
-    fn clone(&self) -> Section<T> {
-        let atomic = unsafe{ &(*self.inner).arc }; // Deref the pointer, get the inner atomic, and reference it.
-        atomic.fetch_add(1, Ordering::AcqRel);
-        Section {
-            inner: self.inner,
-            _marker: PhantomData,
+impl<T> Chair<T> {
+    fn new(data: T) -> Self {
+        Self {
+            data,
+            gen: AtomicU64::new(0), // Starting at gen 0 makes sense I think.
         }
     }
-}
 
+    fn update(&mut self, data: T) {
+        self.gen.fetch_add(1, Ordering::AcqRel); // Increment the generation
+        self.data = data;
+    }
+}
