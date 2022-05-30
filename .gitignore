@@ -6,3 +6,4 @@ CBChannel.rs
 CBChannelRC.rs
 MiscBuildArtifacts/*
 .gitignore
+src/workspace.code-workspace
